@@ -233,39 +233,7 @@ def deep_six_month_analyzer(df):
     st.plotly_chart(fig_mech, use_container_width=True)
     st.plotly_chart(fig_elec, use_container_width=True)
 
-    # 1.4 Major Spare Parts Cost Prediction (bar chart + select for details)
-    st.markdown("**1.4 Major Spare Parts Cost Prediction (Top tokens)**")
-    likely_spare_tokens = [k for k in ['bearing','seal','motor','valve','gear','pump','shaft','coupling','belt','sensor'] if k in token_df['token'].tolist()]
-    top_spares = token_df[token_df['token'].isin(likely_spare_tokens)].head(5)
-    if top_spares.empty and not token_df.empty:
-        top_spares = token_df.head(5)
-    spare_forecasts = []
-    for tok in top_spares['token'].tolist():
-        mask = df6[text_col].str.contains(r'\b' + re.escape(tok) + r'\b', case=False, na=False) if text_col else pd.Series(False, index=df6.index)
-        tok_monthly = monthly_series(df6[mask], value_col='TotSum (actual)') if mask.any() else pd.Series(dtype=float)
-        preds = predict_linear_monthly(tok_monthly, months_ahead=months_ahead, min_months=3)
-        if preds is None:
-            next_q_spend = tok_monthly.mean() * months_ahead if not tok_monthly.empty else 0.0
-        else:
-            next_q_spend = sum(max(0, p) for p in preds)
-        spare_forecasts.append({'keyword': tok, 'next_period_spend': next_q_spend, 'historical_total': tok_monthly.sum() if not tok_monthly.empty else 0.0})
-    spare_df = pd.DataFrame(spare_forecasts).sort_values('next_period_spend', ascending=False)
-    if not spare_df.empty:
-        st.dataframe(spare_df.style.format({"next_period_spend": "LKR {:,.2f}", "historical_total": "LKR {:,.2f}"}), use_container_width=True)
-        st.plotly_chart(px.bar(spare_df, x='keyword', y='next_period_spend', title="Forecasted Spend on Top Spare Keywords", labels={'next_period_spend':'LKR'}), use_container_width=True)
-        sel_spare = st.selectbox("Select spare keyword to view related records", spare_df['keyword'].tolist())
-        if sel_spare:
-            related_rows = df6[df6['Description'].astype(str).str.contains(r'\b' + re.escape(sel_spare) + r'\b', case=False, na=False)]
-            st.markdown(f"Related records count: {len(related_rows)}")
-            st.dataframe(related_rows[['Created_Date','Order','Description','Equipment description','TotSum (actual)']].sort_values('Created_Date', ascending=False), use_container_width=True)
-            if 'Equipment description' in related_rows.columns:
-                equipment_options = sorted(related_rows['Equipment description'].dropna().unique().tolist())
-                if equipment_options:
-                    sel_eq = st.selectbox("Select equipment (from related rows) to view full history", equipment_options, key=f"spare_eq_{sel_spare}")
-                    if sel_eq and st.button("View Equipment History (spare selection)"):
-                        show_machine_details(sel_eq, df6)
-    else:
-        st.write("No spare-part related tokens detected in Description.")
+   
 
     # 1.5 Cost per Asset Trend (bar + clickable)
     st.markdown("**1.5 Cost per Asset Trend (Top 10 machines)**")
