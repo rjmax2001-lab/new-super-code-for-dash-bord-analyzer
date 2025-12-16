@@ -313,11 +313,8 @@ def show_day_details(day_val, df):
     st.divider()
     cols = [c for c in ['Order', 'Description', 'Equipment description', 'Main WorkCtr', 'TotSum (actual)'] if c in sub_df.columns]
     st.dataframe(sub_df[cols], use_container_width=True)
-
  st.header("Deep AI Analysis")
 if st.button("Run Deep 6-Month Analyzer"):
-
-
 # --- COST POPUP ---
 @st.dialog("💰 Detailed Cost & Budget Analysis", width="large")
 def show_cost_popup(df):
