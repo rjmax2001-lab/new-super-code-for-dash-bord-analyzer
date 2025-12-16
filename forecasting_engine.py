@@ -2,347 +2,300 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from datetime import timedelta
-
-# --- MACHINE LEARNING & STATS ---
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
-from sklearn.multioutput import MultiOutputRegressor
-from sklearn.cluster import DBSCAN
-from sklearn.preprocessing import LabelEncoder, StandardScaler
+import plotly.express as px
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+from sklearn.linear_model import LinearRegression
 from sklearn.feature_extraction.text import CountVectorizer
-
-# --- SAFE IMPORTS FOR ADVANCED MODELS ---
-try:
-    from prophet import Prophet
-    PROPHET_AVAILABLE = True
-except ImportError:
-    PROPHET_AVAILABLE = False
-
-try:
-    import xgboost as xgb
-    XGB_AVAILABLE = True
-except ImportError:
-    XGB_AVAILABLE = False
-
-try:
-    from lifelines import CoxPHFitter
-    LIFELINES_AVAILABLE = True
-except ImportError:
-    LIFELINES_AVAILABLE = False
-
-try:
-    from statsmodels.tsa.api import VAR
-    STATSMODELS_AVAILABLE = True
-except ImportError:
-    STATSMODELS_AVAILABLE = False
+import re
 
 # ==========================================
-# 1. VISUALIZATION ENGINE (Blue/Red Standard)
+# 1. CORE MATH ENGINE (Linear & Stats)
 # ==========================================
-def plot_industrial_forecast(history_df, forecast_df, title, y_label):
+
+def monthly_series(series_df, date_col='Created_Date', value_col='TotSum (actual)'):
+    """Converts raw data into monthly sums."""
+    series_df = series_df.copy()
+    series_df[date_col] = pd.to_datetime(series_df[date_col], errors='coerce')
+    series_df = series_df.dropna(subset=[date_col])
+    if series_df.empty:
+        return pd.Series(dtype=float)
+    series_df['Month'] = series_df[date_col].dt.to_period('M')
+    ms = series_df.groupby('Month')[value_col].sum().sort_index()
+    return ms
+
+def predict_linear_monthly(ms, months_ahead=1, min_months=2):
     """
-    Standardized Industrial Plotting:
-    - History: Blue Lines
-    - Forecast: Red Dashed Lines
+    Simple linear trend forecasting. 
+    Returns a list of predicted values for the next N months.
     """
+    if ms is None or len(ms) < min_months:
+        # Fallback: Return average if not enough data for trend
+        if ms is not None and len(ms) > 0:
+            return [float(ms.mean())] * months_ahead
+        return [0.0] * months_ahead
+
+    # Linear Regression
+    x = np.arange(len(ms)).reshape(-1, 1)
+    y = ms.values
+    model = LinearRegression().fit(x, y)
+    
+    preds = []
+    start = len(ms)
+    for i in range(months_ahead):
+        val = model.predict(np.array([[start + i]]))[0]
+        preds.append(max(0.0, float(val))) # No negative costs
+    return preds
+
+def _plot_history_and_forecast(ms, preds, title, y_label="Cost (LKR)"):
+    """Generates the standard Blue (History) -> Red (Forecast) chart."""
     fig = go.Figure()
+    
+    # History
+    if ms is not None and not ms.empty:
+        x_hist = ms.index.astype(str)
+        fig.add_trace(go.Scatter(x=x_hist, y=ms.values, mode='lines+markers', name='History', line=dict(color='#1f77b4', width=3)))
+        last_date = ms.index[-1]
+        last_val = ms.values[-1]
+    else:
+        last_date = pd.Period(datetime.now(), 'M')
+        last_val = 0
 
-    # Historical Data (Blue)
-    if not history_df.empty:
-        fig.add_trace(go.Scatter(
-            x=history_df['ds'], y=history_df['y'],
-            mode='lines', name='Historical',
-            line=dict(color='#1f77b4', width=2) # Blue
-        ))
+    # Forecast
+    if preds:
+        # Create future dates
+        future_dates = [str(last_date + i + 1) for i in range(len(preds))]
+        
+        # Connect last history point to first forecast point
+        x_conn = [str(last_date), future_dates[0]]
+        y_conn = [last_val, preds[0]]
+        fig.add_trace(go.Scatter(x=x_conn, y=y_conn, mode='lines', showlegend=False, line=dict(color='#d62728', width=2, dash='dot')))
+        
+        # Plot rest of forecast
+        fig.add_trace(go.Scatter(x=future_dates, y=preds, mode='lines+markers', name='Forecast', line=dict(color='#d62728', width=2, dash='dot')))
 
-    # Forecast Data (Red)
-    if not forecast_df.empty:
-        fig.add_trace(go.Scatter(
-            x=forecast_df['ds'], y=forecast_df['yhat'],
-            mode='lines', name='Forecast',
-            line=dict(color='#d62728', width=2, dash='dash') # Red
-        ))
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="Date",
-        yaxis_title=y_label,
-        template="plotly_white",
-        hovermode="x unified"
-    )
+    fig.update_layout(title=title, xaxis_title="Month", yaxis_title=y_label, hovermode="x unified", template="plotly_dark")
     return fig
 
 # ==========================================
-# 2. MODEL 1: NEXT MONTH TOTAL COST (Prophet)
+# 2. DEEP ANALYZER (The Main Logic)
 # ==========================================
-def model_total_cost_prophet(df, periods=30):
-    if not PROPHET_AVAILABLE: return None, "Prophet not installed"
-    
-    # Prep Data
-    daily = df.groupby('Created_Date')['TotSum (actual)'].sum().reset_index()
-    daily.columns = ['ds', 'y']
-    
-    if len(daily) < 14: return None, "Insufficient data (<14 days)"
 
-    # Model
-    m = Prophet(daily_seasonality=False, yearly_seasonality=False)
-    m.add_seasonality(name='monthly', period=30.5, fourier_order=5)
-    m.fit(daily)
-    
-    # Forecast
-    future = m.make_future_dataframe(periods=periods)
-    forecast = m.predict(future)
-    
-    # Split for viz
-    forecast_segment = forecast.tail(periods)
-    
-    return (daily, forecast_segment), "Success"
-
-# ==========================================
-# 3. MODEL 2: COST CENTER SPENDING (VAR)
-# ==========================================
-def model_cost_center_var(df):
-    if not STATSMODELS_AVAILABLE: return None, "Statsmodels not installed"
-    
-    # Pivot Data: Date x CostCenter
-    if 'Cost Center' not in df.columns: return None, "Missing 'Cost Center' column"
-    
-    pivot_df = df.pivot_table(index='Created_Date', columns='Cost Center', values='TotSum (actual)', aggfunc='sum').fillna(0)
-    pivot_df = pivot_df.resample('W').sum() # Weekly aggregation for stability
-    
-    if len(pivot_df) < 10: return None, "Insufficient weekly data points"
-
-    try:
-        model = VAR(pivot_df)
-        results = model.fit(maxlags=2)
-        lag_order = results.k_ar
-        
-        # Forecast 4 weeks ahead
-        forecast_input = pivot_df.values[-lag_order:]
-        fc = results.forecast(y=forecast_input, steps=4)
-        
-        fc_df = pd.DataFrame(fc, index=pd.date_range(start=pivot_df.index[-1], periods=5, freq='W')[1:], columns=pivot_df.columns)
-        return fc_df, "Success"
-    except Exception as e:
-        return None, str(e)
-
-# ==========================================
-# 4. MODEL 3: HIGH-VALUE REPAIR PROB (XGBoost)
-# ==========================================
-def model_high_value_repair_xgb(df):
-    if not XGB_AVAILABLE: return None, "XGBoost not installed"
-    
-    # Feature Engineering
-    df_ml = df.copy()
-    threshold = df_ml['TotSum (actual)'].quantile(0.85) # Top 15% are "High Value"
-    df_ml['Is_High_Value'] = (df_ml['TotSum (actual)'] > threshold).astype(int)
-    
-    # Basic Features
-    df_ml['Month'] = df_ml['Created_Date'].dt.month
-    df_ml['Day'] = df_ml['Created_Date'].dt.dayofweek
-    
-    # Encode Description length as proxy for complexity
-    df_ml['Desc_Len'] = df_ml['Description'].astype(str).str.len()
-    
-    features = ['Month', 'Day', 'Desc_Len']
-    X = df_ml[features].fillna(0)
-    y = df_ml['Is_High_Value']
-    
-    model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss')
-    model.fit(X, y)
-    
-    # Return feature importance
-    importance = pd.DataFrame({'Feature': features, 'Importance': model.feature_importances_})
-    return importance.sort_values('Importance', ascending=False), f"Threshold > {threshold:.2f}"
-
-# ==========================================
-# 5. MODEL 4: MECH VS ELEC SPLIT (Multi-Output Regression)
-# ==========================================
-def model_mech_elec_split(df):
-    # Heuristic labeling if explicit columns don't exist
-    df['Type'] = df['Description'].astype(str).str.lower().apply(
-        lambda x: 'Electrical' if any(w in x for w in ['sensor', 'motor', 'fuse', 'cable']) else 'Mechanical'
-    )
-    
-    daily_split = df.groupby(['Created_Date', 'Type'])['TotSum (actual)'].sum().unstack(fill_value=0)
-    daily_split['Total_Orders'] = df.groupby('Created_Date')['Order'].count()
-    
-    daily_split = daily_split.resample('W').sum().fillna(0)
-    
-    if len(daily_split) < 5: return None, "Insufficient Data"
-    
-    # Predict Mech and Elec cost based on Order Volume
-    X = daily_split[['Total_Orders']]
-    y = daily_split[['Mechanical', 'Electrical']] if 'Electrical' in daily_split.columns else daily_split
-    
-    model = MultiOutputRegressor(RandomForestRegressor())
-    model.fit(X, y)
-    
-    return daily_split, model
-
-# ==========================================
-# 6. MODEL 5: AVG REPAIR COST (Random Forest)
-# ==========================================
-def model_avg_cost_rf(df):
-    # Features: Text Length, Equipment ID encoded
-    df['Desc_Len'] = df['Description'].astype(str).str.len()
-    le = LabelEncoder()
-    df['Equip_Enc'] = le.fit_transform(df['Equipment description'].astype(str))
-    
-    X = df[['Desc_Len', 'Equip_Enc']]
-    y = df['TotSum (actual)']
-    
-    rf = RandomForestRegressor(n_estimators=50)
-    rf.fit(X, y)
-    
-    return rf, "Model Trained"
-
-# ==========================================
-# 7. MODEL 6: TOP FAILING ASSETS (Survival/CoxPH)
-# ==========================================
-def model_survival_analysis(df):
-    if not LIFELINES_AVAILABLE: return None, "Lifelines not installed"
-    
-    # Calculate Duration (Time since last failure)
-    df_sorted = df.sort_values(['Equipment description', 'Created_Date'])
-    df_sorted['Prev_Date'] = df_sorted.groupby('Equipment description')['Created_Date'].shift(1)
-    df_sorted['Days_Since'] = (df_sorted['Created_Date'] - df_sorted['Prev_Date']).dt.days
-    
-    survival_data = df_sorted.dropna(subset=['Days_Since'])
-    survival_data['Event'] = 1 # All records here are failures
-    
-    if len(survival_data) < 10: return None, "Insufficient intervals"
-    
-    # Use only equipment with >2 failures
-    counts = survival_data['Equipment description'].value_counts()
-    valid_equip = counts[counts > 2].index
-    survival_data = survival_data[survival_data['Equipment description'].isin(valid_equip)]
-    
-    # Dummy encoding for equipment is too heavy for small data, using simple mean encoding or just TBF
-    # For robust CoxPH, we need covariates. Here we just return the TBF stats as Cox requires distinct covariates
-    return survival_data.groupby('Equipment description')['Days_Since'].mean().sort_values(), "Mean TBF Calculated"
-
-# ==========================================
-# 8. MODEL 7: SPARE PART CLASSIFICATION (Zero-Shot / NLP)
-# ==========================================
-def model_spare_part_classifier(df):
-    # Zero-Shot requires heavy transformers. We use a Keyword-Bag Fallback for speed/stability.
-    categories = {
-        'Bearings': ['bearing', 'ball', 'roller'],
-        'Seals': ['seal', 'gasket', 'ring'],
-        'Electrical': ['sensor', 'fuse', 'cable', 'switch', 'motor'],
-        'Hydraulic': ['pump', 'valve', 'cylinder', 'hose'],
-        'Fasteners': ['bolt', 'nut', 'screw', 'washer']
-    }
-    
-    def classify(text):
-        text = str(text).lower()
-        for cat, keywords in categories.items():
-            if any(k in text for k in keywords):
-                return cat
-        return 'General/Consumable'
-
-    classified = df['Description'].apply(classify).value_counts()
-    return classified
-
-# ==========================================
-# 9. MODEL 8: HOTSPOT DETECTION (DBSCAN)
-# ==========================================
-def model_hotspot_dbscan(df):
-    if 'Functional Location' not in df.columns: return None, "No Location Column"
-    
-    # Encode locations to numerical space
-    le = LabelEncoder()
-    coords = le.fit_transform(df['Functional Location'].astype(str)).reshape(-1, 1)
-    
-    # Cluster
-    db = DBSCAN(eps=3, min_samples=5).fit(coords)
-    df['Cluster'] = db.labels_
-    
-    hotspots = df[df['Cluster'] != -1]['Functional Location'].value_counts()
-    return hotspots
-
-# ==========================================
-# 10. MODEL 9: CRITICAL LINE (Markov Chain)
-# ==========================================
-def model_line_markov(df):
-    # Simulate Line Status based on Order Types (Breakdown = Down, PM = Running)
-    # 0 = Running, 1 = Down
-    df['State'] = np.where(df['Order Type'] == 'Breakdown maintenance', 1, 0)
-    df_sorted = df.sort_values('Created_Date')
-    
-    transitions = np.zeros((2, 2))
-    
-    states = df_sorted['State'].values
-    for (i, j) in zip(states, states[1:]):
-        transitions[i][j] += 1
-        
-    # Normalize
-    trans_prob = transitions / transitions.sum(axis=1, keepdims=True)
-    return trans_prob
-
-# ==========================================
-# MAIN WRAPPER FOR APP
-# ==========================================
 def deep_six_month_analyzer(df):
-    st.markdown("## 🏭 Industrial AI Analytics Engine")
-    st.markdown("Automatic selection of statistical models based on data topology.")
+    st.markdown("## 🏭 Deep Industrial Analyzer (6-Month Lookback)")
     
     if 'Created_Date' not in df.columns:
-        st.error("Error: 'Created_Date' column is missing.")
+        st.error("Error: 'Created_Date' column missing.")
         return
 
-    # 1. Total Cost Forecast (Prophet)
-    st.subheader("1. Next Month Total Cost (Prophet)")
-    data, status = model_total_cost_prophet(df)
-    if data:
-        hist, fcst = data
-        fig = plot_industrial_forecast(hist, fcst, "Total Maintenance Cost Forecast", "Cost (LKR)")
-        st.plotly_chart(fig, use_container_width=True)
-        next_m_sum = fcst['yhat'].sum()
-        st.info(f"Predicted Spend Next 30 Days: **LKR {next_m_sum:,.2f}**")
+    # 1. DATA PREP (Last 6 Months Only)
+    df['Created_Date'] = pd.to_datetime(df['Created_Date'], errors='coerce')
+    df = df.dropna(subset=['Created_Date'])
+    
+    max_date = df['Created_Date'].max()
+    cutoff_date = max_date - relativedelta(months=6)
+    df6 = df[df['Created_Date'] >= cutoff_date].copy()
+    
+    if df6.empty:
+        st.warning("No data found in the last 6 months.")
+        return
+
+    # 2. CLEANUP
+    if 'Equipment description' in df6.columns:
+        # Remove entries where equipment is unknown or empty
+        df6 = df6[df6['Equipment description'].notna()]
+        df6 = df6[df6['Equipment description'].astype(str).str.strip() != '']
+        df6 = df6[~df6['Equipment description'].astype(str).str.lower().isin(['nan', 'unknown', 'none'])]
+
+    # --- SECTION A: CRITICAL ASSET FAILURE ANALYTICS ---
+    st.markdown("### 1. 🚨 Critical Asset Reliability & Spare Parts")
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        # PIE CHART: Failure Distribution
+        if 'Equipment description' in df6.columns:
+            fail_counts = df6['Equipment description'].value_counts().head(10)
+            fig_fail = px.pie(
+                names=fail_counts.index, 
+                values=fail_counts.values, 
+                title="Top 10 Failing Assets (Failure %)",
+                hole=0.4
+            )
+            fig_fail.update_traces(textinfo='percent+label')
+            st.plotly_chart(fig_fail, use_container_width=True)
+            
+            top_asset_list = fail_counts.index.tolist()
+        else:
+            st.warning("Equipment description column missing.")
+            top_asset_list = []
+
+    with col2:
+        # INTERACTIVE: Asset Specific Spare Parts
+        st.markdown("#### 🛠️ Asset Spare Part Forecaster")
+        st.info("Select an asset below to see what parts it will need next month.")
+        
+        selected_asset = st.selectbox("Select Failing Asset:", top_asset_list)
+        
+        if selected_asset:
+            # Filter data for this asset
+            asset_df = df6[df6['Equipment description'] == selected_asset]
+            
+            # Extract Keywords from Description (Simple NLP)
+            # We look for words that look like spare parts (ignoring common stopwords)
+            vectorizer = CountVectorizer(stop_words='english', max_features=20)
+            try:
+                X = vectorizer.fit_transform(asset_df['Description'].fillna("").astype(str))
+                words = vectorizer.get_feature_names_out()
+                counts = X.toarray().sum(axis=0)
+                
+                # Create a mini forecast for these parts
+                part_forecasts = []
+                for word, count in zip(words, counts):
+                    # Filter for this word specifically
+                    mask = asset_df['Description'].str.contains(word, case=False, na=False)
+                    monthly_usage = monthly_series(asset_df[mask], value_col='Order') # Count of orders
+                    next_month_qty = predict_linear_monthly(monthly_usage, months_ahead=1)[0]
+                    
+                    if next_month_qty > 0.1: # Only show significant predictions
+                        part_forecasts.append({
+                            'Spare Part Keyword': word.capitalize(),
+                            'History (6m)': count,
+                            'Forecast (Next Month)': round(next_month_qty, 1)
+                        })
+                
+                pf_df = pd.DataFrame(part_forecasts).sort_values('Forecast (Next Month)', ascending=False)
+                
+                if not pf_df.empty:
+                    st.dataframe(pf_df, use_container_width=True, hide_index=True)
+                    st.caption(f"Based on historical consumption patterns for **{selected_asset}**.")
+                else:
+                    st.write("No specific spare part trends detected for this asset.")
+                    
+            except ValueError:
+                st.write("Not enough text data to extract spare parts.")
+
+    # --- SECTION B: MECHANICAL VS ELECTRICAL (Fixed) ---
+    st.markdown("### 2. ⚡ Mechanical vs Electrical Forecast (Robust)")
+    
+    # 1. Try to split by explicit column first
+    mech_mask = pd.Series([False] * len(df6), index=df6.index)
+    elec_mask = pd.Series([False] * len(df6), index=df6.index)
+    
+    if 'Main WorkCtr' in df6.columns:
+        mech_mask = df6['Main WorkCtr'].astype(str).str.contains('Mech', case=False)
+        elec_mask = df6['Main WorkCtr'].astype(str).str.contains('Elec', case=False)
+    
+    # 2. Fallback: Search keywords in Description if mask is empty
+    if not mech_mask.any() and not elec_mask.any():
+        st.caption("⚠️ 'Main WorkCtr' not found/empty. Using keyword search (Pump, Motor, etc.) to classify.")
+        mech_keywords = ['pump', 'gear', 'bearing', 'mech', 'weld', 'pipe', 'valve']
+        elec_keywords = ['motor', 'sensor', 'cable', 'fuse', 'switch', 'panel', 'electric', 'circuit']
+        
+        mech_mask = df6['Description'].str.contains('|'.join(mech_keywords), case=False, na=False)
+        elec_mask = df6['Description'].str.contains('|'.join(elec_keywords), case=False, na=False)
+
+    # 3. Generate Series
+    mech_series = monthly_series(df6[mech_mask])
+    elec_series = monthly_series(df6[elec_mask])
+    
+    # 4. Forecast
+    mech_pred = predict_linear_monthly(mech_series, months_ahead=3)
+    elec_pred = predict_linear_monthly(elec_series, months_ahead=3)
+    
+    # 5. Plot
+    fig_split = go.Figure()
+    
+    # Mechanical Line
+    if not mech_series.empty:
+        fig_split.add_trace(go.Scatter(x=mech_series.index.astype(str), y=mech_series.values, name="Mechanical (Hist)", line=dict(color='cyan')))
+        # Forecast
+        last_date = mech_series.index[-1]
+        future_dates = [str(last_date + i + 1) for i in range(3)]
+        fig_split.add_trace(go.Scatter(x=future_dates, y=mech_pred, name="Mech Forecast", line=dict(color='cyan', dash='dot')))
+
+    # Electrical Line
+    if not elec_series.empty:
+        fig_split.add_trace(go.Scatter(x=elec_series.index.astype(str), y=elec_series.values, name="Electrical (Hist)", line=dict(color='orange')))
+        # Forecast
+        last_date = elec_series.index[-1]
+        future_dates = [str(last_date + i + 1) for i in range(3)]
+        fig_split.add_trace(go.Scatter(x=future_dates, y=elec_pred, name="Elec Forecast", line=dict(color='orange', dash='dot')))
+        
+    fig_split.update_layout(title="Departmental Spending Forecast", xaxis_title="Month", yaxis_title="Cost", template="plotly_dark")
+    st.plotly_chart(fig_split, use_container_width=True)
+
+    # --- SECTION C: FAILURE HOTSPOTS ---
+    st.markdown("### 3. 📍 Failure Hotspot Detection")
+    if 'Functional Location' in df6.columns:
+        hotspots = df6['Functional Location'].value_counts().head(10).reset_index()
+        hotspots.columns = ['Location', 'Failures']
+        
+        # Bar Chart
+        fig_hot = px.bar(hotspots, x='Failures', y='Location', orientation='h', title="Most Problematic Physical Locations", color='Failures', color_continuous_scale='Reds')
+        st.plotly_chart(fig_hot, use_container_width=True)
     else:
-        st.warning(f"Skipped: {status}")
+        st.info("Functional Location column not found. Cannot map hotspots.")
 
-    # 2. Mech vs Elec Split
-    st.subheader("2. Mechanical vs Electrical Forecasting")
-    split_data, _ = model_mech_elec_split(df)
-    if split_data is not None:
-        st.line_chart(split_data[['Mechanical', 'Electrical']])
+    # --- SECTION D: CRITICAL LINE FAILURE FORECAST (Markov) ---
+    st.markdown("### 4. 📉 Critical Line Failure Forecast (Markov Chain)")
+    
+    # We need to simulate a timeline. 
+    # Logic: If an order exists on a day, is it a breakdown?
+    daily_status = df6.groupby(df6['Created_Date'].dt.date)['Order Type'].apply(lambda x: 'Breakdown' if 'Breakdown maintenance' in x.values else 'Running')
+    
+    if len(daily_status) > 10:
+        # Calculate Transition Matrix
+        transitions = {'Running->Running': 0, 'Running->Down': 0, 'Down->Running': 0, 'Down->Down': 0}
+        states = daily_status.values
+        
+        for i in range(len(states)-1):
+            current = states[i]
+            nxt = states[i+1]
+            key = 'Running' if current == 'Running' else 'Down'
+            key_next = 'Running' if nxt == 'Running' else 'Down'
+            transitions[f"{key}->{key_next}"] += 1
+            
+        # Calc Probabilities
+        run_runs = transitions['Running->Running'] + transitions['Running->Down']
+        down_downs = transitions['Down->Running'] + transitions['Down->Down']
+        
+        p_fail = transitions['Running->Down'] / run_runs if run_runs > 0 else 0
+        p_recover = transitions['Down->Running'] / down_downs if down_downs > 0 else 0
+        p_stuck = transitions['Down->Down'] / down_downs if down_downs > 0 else 0
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Risk of Failure (Daily)", f"{p_fail:.1%}", "If currently running")
+        c2.metric("Recovery Probability", f"{p_recover:.1%}", "Chance to fix in 1 day")
+        c3.metric("Critical Stuck Risk", f"{p_stuck:.1%}", "Chance failure lasts >24h")
+        
+        # Visualizing the Chain
+        nodes = ['Running', 'Down']
+        # Sankey Diagram for flow
+        fig_markov = go.Figure(data=[go.Sankey(
+            node = dict(
+              pad = 15, thickness = 20,
+              line = dict(color = "black", width = 0.5),
+              label = ["Running", "Down"],
+              color = ["green", "red"]
+            ),
+            link = dict(
+              source = [0, 0, 1, 1], # 0=Running, 1=Down
+              target = [0, 1, 0, 1],
+              value = [transitions['Running->Running'], transitions['Running->Down'], transitions['Down->Running'], transitions['Down->Down']]
+          ))])
+        
+        fig_markov.update_layout(title="Operational State Transitions (Flow of Reliability)", font_size=10)
+        st.plotly_chart(fig_markov, use_container_width=True)
+        
     else:
-        st.write("Could not split data by type.")
+        st.write("Not enough daily data points to build a Markov Model.")
 
-    # 3. High Value Repair (XGBoost)
-    st.subheader("3. High-Value Repair Probability (XGBoost)")
-    imp, thresh = model_high_value_repair_xgb(df)
-    if imp is not None:
-        st.write(f"Key drivers for repairs costing {thresh}:")
-        st.dataframe(imp, use_container_width=True)
-    else:
-        st.warning("XGBoost not available or insufficient data.")
-
-    # 4. Spare Parts (NLP)
-    st.subheader("4. Spare Part Classification (Zero-Shot Logic)")
-    cats = model_spare_part_classifier(df)
-    st.bar_chart(cats)
-
-    # 5. Reliability (Survival)
-    st.subheader("5. Top Failing Assets (Mean TBF)")
-    tbf_data, msg = model_survival_analysis(df)
-    if tbf_data is not None:
-        st.dataframe(tbf_data.head(5), use_container_width=True)
-    else:
-        st.warning(msg)
-
-    # 6. Markov Chain
-    st.subheader("6. Operational State Transition (Markov)")
-    trans_matrix = model_line_markov(df)
-    st.write("Probability Matrix [Running, Down] -> [Running, Down]")
-    st.write(trans_matrix)
-    st.caption(f"Probability of staying Down if currently Down: {trans_matrix[1][1]:.1%}")
-
-# --- COMPATIBILITY WRAPPERS ---
-def forecast_spare_parts(df): return None, "Please use Deep Analyzer"
-def forecast_cost_prophet(df): return model_total_cost_prophet(df)
-def forecast_failure_rf(df): return None, "Included in Deep Analyzer"
+    # --- SECTION E: TOTAL COST FORECAST (Simple) ---
+    st.markdown("### 5. 💰 Global Budget Forecast")
+    total_series = monthly_series(df6)
+    total_preds = predict_linear_monthly(total_series, months_ahead=3)
+    fig_total = _plot_history_and_forecast(total_series, total_preds, "Total Maintenance Cost Forecast")
+    st.plotly_chart(fig_total, use_container_width=True)
+    if total_preds:
+        st.success(f"Predicted Spend Next Month: **LKR {total_preds[0]:,.2f}**")
