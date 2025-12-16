@@ -8,6 +8,8 @@ from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 import streamlit as st
+import re
+from sklearn.linear_model import LinearRegression
 # ... other imports ...
 def monthly_series(series_df, date_col='Created_Date', value_col='TotSum (actual)'):
     series_df = series_df.copy()
