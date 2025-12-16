@@ -314,6 +314,8 @@ def show_day_details(day_val, df):
     cols = [c for c in ['Order', 'Description', 'Equipment description', 'Main WorkCtr', 'TotSum (actual)'] if c in sub_df.columns]
     st.dataframe(sub_df[cols], use_container_width=True)
 
+ st.header("Deep AI Analysis")
+if st.button("Run Deep 6-Month Analyzer"):
 
 
 # --- COST POPUP ---
@@ -420,8 +422,7 @@ def main():
 
 
 
-    st.header("Deep AI Analysis")
-if st.button("Run Deep 6-Month Analyzer"):
+   
     deep_six_month_analyzer(df)
     # HEADER & CLOCK & LOGO
     c_left, c_right = st.columns([5, 2])
