@@ -353,41 +353,37 @@ def show_cost_popup(df):
 # --- MAIN APP ---
 # --- MAIN APP ---
 def main():
-    # 1. Initialize Session State
+    # 1. INITIALIZE VARIABLES (Fixes 'not defined' error)
+    files_to_process = [] 
+    df = None
+
+    # 2. Initialize Session State
     if 'removed_negatives' not in st.session_state:
         st.session_state['removed_negatives'] = None
-    if 'negatives_restored' not in st.session_state:
-        st.session_state['negatives_restored'] = False
-    if 'show_filtered_negatives' not in st.session_state:
-        st.session_state['show_filtered_negatives'] = False
     if 'df_main' not in st.session_state:
         st.session_state['df_main'] = None
 
-    # 2. Sidebar Logic
+    # 3. SIDEBAR LOGIC
     with st.sidebar:
-        st.markdown('<div class="watermark">Created By Trainee at Engineering Dpt.</div>', unsafe_allow_html=True)
-        st.markdown("""
-            <div class="logo-container">
-                <img src="https://cdn-icons-png.flaticon.com/512/2920/2920349.png" width="80">
-                <h3>Maintenance Analyzer</h3>
-            </div>
-        """, unsafe_allow_html=True)
-
+        st.markdown('### Maintenance Analyzer')
+        
+        # Mode Selection
         mode = st.radio("Select Mode", ["Standard Dashboard", "AI Analyzer (Deep 6-Month Forecast)"])
 
-        # File Uploader
-        files_to_process = []
+        # File Uploader Logic
         if mode == "Standard Dashboard":
             uploaded = st.file_uploader("Upload Monthly File", type=['xlsx', 'csv'], accept_multiple_files=True)
-            if uploaded: files_to_process = uploaded
+            if uploaded: 
+                files_to_process = uploaded
         else:
             st.markdown("### Upload files covering the last 6 months")
             uploaded_ai = st.file_uploader("Upload History", type=['xlsx', 'csv'], accept_multiple_files=True, key="ai_uploads")
-            if uploaded_ai: files_to_process = uploaded_ai
+            if uploaded_ai: 
+                files_to_process = uploaded_ai
 
         st.markdown("---")
 
-        # Sidebar Search
+        # Search Logic
         if st.session_state['df_main'] is not None:
             st.markdown("### 🔎 Universal Search")
             search_q = st.text_input("Order # or Keyword", placeholder="Type here...")
@@ -395,53 +391,52 @@ def main():
                 mask = st.session_state['df_main'].astype(str).apply(lambda x: x.str.contains(search_q, case=False, na=False)).any(axis=1)
                 search_results = st.session_state['df_main'][mask]
                 st.write(f"Found {len(search_results)} matches:")
-                show_cols = [c for c in ['Order', 'Description', 'TotSum (actual)'] if c in search_results.columns]
-                st.dataframe(search_results[show_cols], hide_index=True)
+                # Show specific columns if they exist
+                cols = [c for c in ['Order', 'Description', 'TotSum (actual)'] if c in search_results.columns]
+                st.dataframe(search_results[cols], hide_index=True)
 
-        st.markdown("---")
-
-        # Negative Values Logic
-        if st.session_state.get('removed_negatives') is not None and not st.session_state['removed_negatives'].empty:
-            if st.button("➕ Add Filtered Negative Rows (Permanent)"):
-                if st.session_state['df_main'] is not None:
-                    merged = pd.concat([st.session_state['df_main'], st.session_state['removed_negatives']], ignore_index=True)
-                    st.session_state['df_main'] = merged
-                    st.session_state['removed_negatives'] = pd.DataFrame() # Clear buffer
-                    st.success("Negatives added back to dataset.")
-
-    # 3. Main Data Loading Logic
+    # 4. MAIN DATA LOADING LOGIC
+    # We check if new files were uploaded
     if files_to_process:
-        # Load files if they haven't been loaded into session state yet
-        # OR if the user uploaded new files (simple logic: just reload if files are present)
         all_dfs = []
         for file in files_to_process:
-            # We assume load_and_clean_data handles the single file loading
-            current_df = load_and_clean_data(file) 
-            if current_df is not None:
-                all_dfs.append(current_df)
+            try:
+                # Load using your data handler
+                current_df = load_and_clean_data(file)
+                if current_df is not None:
+                    all_dfs.append(current_df)
+            except Exception as e:
+                st.error(f"Error loading {file.name}: {e}")
         
         if all_dfs:
+            # Combine all uploaded files into one big dataframe
             st.session_state['df_main'] = pd.concat(all_dfs, ignore_index=True)
+            st.success(f"Successfully loaded {len(files_to_process)} files!")
 
-    # 4. Mode Routing
+    # 5. DASHBOARD RENDERING
+    # Get the data from session state
     df = st.session_state['df_main']
 
     if df is not None:
         if mode == "Standard Dashboard":
             st.title("Standard Maintenance Dashboard")
-            st.write("Data Loaded successfully.")
-            # ... [Place your Standard Dashboard code here, e.g. Tabs, Charts] ...
-            st.dataframe(df.head()) # Preview
-
+            st.write("### Current Dataset Preview")
+            st.dataframe(df.head())
+            
+            # --- Place your Standard Dashboard Tabs/Charts here ---
+            # Example:
+            # tab1, tab2 = st.tabs(["Overview", "Forecasting"])
+            # with tab1: ...
+            
         elif mode == "AI Analyzer (Deep 6-Month Forecast)":
-            # This calls the function from forecasting_engine.py
+            # This calls the advanced AI function
             deep_six_month_analyzer(df)
             
     else:
         st.info("👈 Please upload your Excel/CSV files in the sidebar to begin.")
 
 if __name__ == "__main__":
-    main()
+    main())
     # HEADER & CLOCK & LOGO
     c_left, c_right = st.columns([5, 2])
     with c_left:
