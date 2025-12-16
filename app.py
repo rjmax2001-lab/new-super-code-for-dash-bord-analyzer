@@ -351,14 +351,19 @@ def show_cost_popup(df):
             show_machine_details(sel_machine, df)
 
 # --- MAIN APP ---
+# --- MAIN APP ---
 def main():
+    # 1. Initialize Session State
     if 'removed_negatives' not in st.session_state:
         st.session_state['removed_negatives'] = None
     if 'negatives_restored' not in st.session_state:
         st.session_state['negatives_restored'] = False
     if 'show_filtered_negatives' not in st.session_state:
         st.session_state['show_filtered_negatives'] = False
+    if 'df_main' not in st.session_state:
+        st.session_state['df_main'] = None
 
+    # 2. Sidebar Logic
     with st.sidebar:
         st.markdown('<div class="watermark">Created By Trainee at Engineering Dpt.</div>', unsafe_allow_html=True)
         st.markdown("""
@@ -370,20 +375,20 @@ def main():
 
         mode = st.radio("Select Mode", ["Standard Dashboard", "AI Analyzer (Deep 6-Month Forecast)"])
 
+        # File Uploader
         files_to_process = []
         if mode == "Standard Dashboard":
             uploaded = st.file_uploader("Upload Monthly File", type=['xlsx', 'csv'], accept_multiple_files=True)
-            if uploaded:
-                files_to_process = uploaded
+            if uploaded: files_to_process = uploaded
         else:
-            st.markdown("### Upload files covering the last 6 months (multiple files allowed)")
-            uploaded_ai = st.file_uploader("Upload files (last 6 months)", type=['xlsx', 'csv'], accept_multiple_files=True, key="ai_uploads")
-            if uploaded_ai:
-                files_to_process = uploaded_ai
+            st.markdown("### Upload files covering the last 6 months")
+            uploaded_ai = st.file_uploader("Upload History", type=['xlsx', 'csv'], accept_multiple_files=True, key="ai_uploads")
+            if uploaded_ai: files_to_process = uploaded_ai
 
         st.markdown("---")
 
-        if 'df_main' in st.session_state:
+        # Sidebar Search
+        if st.session_state['df_main'] is not None:
             st.markdown("### 🔎 Universal Search")
             search_q = st.text_input("Order # or Keyword", placeholder="Type here...")
             if search_q:
@@ -395,38 +400,48 @@ def main():
 
         st.markdown("---")
 
-        if 'df_main' in st.session_state and mode == "Standard Dashboard":
-            if st.button("📥 Download Report (PDF)"):
-                try:
-                    pdf_path = generate_pdf(st.session_state['df_main'])
-                    with open(pdf_path, "rb") as f:
-                        st.download_button("Click to Save PDF", f, file_name="Maintenance_Report.pdf")
-                except Exception as e:
-                    st.error(f"PDF Error: {e}")
-
-        st.markdown("---")
-        if st.session_state.get('removed_negatives') is not None and not (st.session_state['removed_negatives'] is None) and not st.session_state['removed_negatives'].empty:
-            if st.button("➕ Add Filtered Negative Rows to Dataset (Permanent)"):
-                if 'df_main' in st.session_state and st.session_state['df_main'] is not None:
+        # Negative Values Logic
+        if st.session_state.get('removed_negatives') is not None and not st.session_state['removed_negatives'].empty:
+            if st.button("➕ Add Filtered Negative Rows (Permanent)"):
+                if st.session_state['df_main'] is not None:
                     merged = pd.concat([st.session_state['df_main'], st.session_state['removed_negatives']], ignore_index=True)
                     st.session_state['df_main'] = merged
-                    st.session_state['removed_negatives'] = pd.DataFrame()
-                    st.session_state['negatives_restored'] = True
-                    st.success("Filtered negative rows have been permanently added to the main dataset.")
-                else:
-                    st.error("No main dataset found to merge into. Please upload files first.")
+                    st.session_state['removed_negatives'] = pd.DataFrame() # Clear buffer
+                    st.success("Negatives added back to dataset.")
 
-                def main():
-                                # ... previous code ...
-                    st.write("End of previous section")
-                            
-                                # CORRECT: Aligned with the code above
-                    st.header("Deep AI Analysis") 
-                    if st.button("Run Deep 6-Month Analyzer"):
-                        deep_six_month_analyzer(df)
+    # 3. Main Data Loading Logic
+    if files_to_process:
+        # Load files if they haven't been loaded into session state yet
+        # OR if the user uploaded new files (simple logic: just reload if files are present)
+        all_dfs = []
+        for file in files_to_process:
+            # We assume load_and_clean_data handles the single file loading
+            current_df = load_and_clean_data(file) 
+            if current_df is not None:
+                all_dfs.append(current_df)
+        
+        if all_dfs:
+            st.session_state['df_main'] = pd.concat(all_dfs, ignore_index=True)
 
-   
-    deep_six_month_analyzer(df)
+    # 4. Mode Routing
+    df = st.session_state['df_main']
+
+    if df is not None:
+        if mode == "Standard Dashboard":
+            st.title("Standard Maintenance Dashboard")
+            st.write("Data Loaded successfully.")
+            # ... [Place your Standard Dashboard code here, e.g. Tabs, Charts] ...
+            st.dataframe(df.head()) # Preview
+
+        elif mode == "AI Analyzer (Deep 6-Month Forecast)":
+            # This calls the function from forecasting_engine.py
+            deep_six_month_analyzer(df)
+            
+    else:
+        st.info("👈 Please upload your Excel/CSV files in the sidebar to begin.")
+
+if __name__ == "__main__":
+    main()
     # HEADER & CLOCK & LOGO
     c_left, c_right = st.columns([5, 2])
     with c_left:
