@@ -19,7 +19,7 @@ import streamlit as st
 
 # LINK TO YOUR NEW FILES
 from data_handler import load_and_clean_data, ITEM_DB
-from forecasting_engine import forecast_spare_parts, forecast_cost_prophet
+from forecasting_engine import forecast_spare_parts, forecast_cost_prophet, forecast_failure_rf, deep_six_month_analyzer
 
 # --- AI LIBRARIES ---
 from langchain_experimental.agents import create_pandas_dataframe_agent
@@ -418,6 +418,11 @@ def main():
                 else:
                     st.error("No main dataset found to merge into. Please upload files first.")
 
+
+
+    st.header("Deep AI Analysis")
+if st.button("Run Deep 6-Month Analyzer"):
+    deep_six_month_analyzer(df)
     # HEADER & CLOCK & LOGO
     c_left, c_right = st.columns([5, 2])
     with c_left:
