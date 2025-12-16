@@ -416,20 +416,17 @@ def main():
                 else:
                     st.error("No main dataset found to merge into. Please upload files first.")
 
-
+                    def main():
+                                # ... previous code ...
+                                st.write("End of previous section")
+                            
+                                # CORRECT: Aligned with the code above
+                                st.header("Deep AI Analysis") 
+                                if st.button("Run Deep 6-Month Analyzer"):
+                                    deep_six_month_analyzer(df)
 
    
     deep_six_month_analyzer(df)
-    
-            def main():
-            # ... previous code ...
-            st.write("End of previous section")
-        
-            # CORRECT: Aligned with the code above
-            st.header("Deep AI Analysis") 
-            if st.button("Run Deep 6-Month Analyzer"):
-                deep_six_month_analyzer(df)
-                
     # HEADER & CLOCK & LOGO
     c_left, c_right = st.columns([5, 2])
     with c_left:
