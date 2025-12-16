@@ -105,7 +105,7 @@ def deep_six_month_analyzer(df):
         # Remove entries where equipment is unknown or empty
         df6 = df6[df6['Equipment description'].notna()]
         df6 = df6[df6['Equipment description'].astype(str).str.strip() != '']
-        df6 = df6[~df6['Equipment description'].astype(str).str.lower().isin(['nan', 'unknown', 'none'])]
+        df6 = df6[~df6['Equipment description'].astype(str).str.lower().isin(['nan', 'unknown', 'none', 'unknown asset'])]
 
     # --- SECTION A: CRITICAL ASSET FAILURE ANALYTICS ---
     st.markdown("### 1. 🚨 Critical Asset Reliability & Spare Parts")
@@ -142,7 +142,6 @@ def deep_six_month_analyzer(df):
             asset_df = df6[df6['Equipment description'] == selected_asset]
             
             # Extract Keywords from Description (Simple NLP)
-            # We look for words that look like spare parts (ignoring common stopwords)
             vectorizer = CountVectorizer(stop_words='english', max_features=20)
             try:
                 X = vectorizer.fit_transform(asset_df['Description'].fillna("").astype(str))
@@ -168,17 +167,16 @@ def deep_six_month_analyzer(df):
                 
                 if not pf_df.empty:
                     st.dataframe(pf_df, use_container_width=True, hide_index=True)
-                    st.caption(f"Based on historical consumption patterns for **{selected_asset}**.")
+                    st.caption(f"Based on consumption patterns for **{selected_asset}**.")
                 else:
                     st.write("No specific spare part trends detected for this asset.")
                     
             except ValueError:
                 st.write("Not enough text data to extract spare parts.")
 
-    # --- SECTION B: MECHANICAL VS ELECTRICAL (Fixed) ---
-    st.markdown("### 2. ⚡ Mechanical vs Electrical Forecast (Robust)")
+    # --- SECTION B: MECHANICAL VS ELECTRICAL ---
+    st.markdown("### 2. ⚡ Mechanical vs Electrical Forecast")
     
-    # 1. Try to split by explicit column first
     mech_mask = pd.Series([False] * len(df6), index=df6.index)
     elec_mask = pd.Series([False] * len(df6), index=df6.index)
     
@@ -186,38 +184,27 @@ def deep_six_month_analyzer(df):
         mech_mask = df6['Main WorkCtr'].astype(str).str.contains('Mech', case=False)
         elec_mask = df6['Main WorkCtr'].astype(str).str.contains('Elec', case=False)
     
-    # 2. Fallback: Search keywords in Description if mask is empty
     if not mech_mask.any() and not elec_mask.any():
-        st.caption("⚠️ 'Main WorkCtr' not found/empty. Using keyword search (Pump, Motor, etc.) to classify.")
         mech_keywords = ['pump', 'gear', 'bearing', 'mech', 'weld', 'pipe', 'valve']
         elec_keywords = ['motor', 'sensor', 'cable', 'fuse', 'switch', 'panel', 'electric', 'circuit']
-        
         mech_mask = df6['Description'].str.contains('|'.join(mech_keywords), case=False, na=False)
         elec_mask = df6['Description'].str.contains('|'.join(elec_keywords), case=False, na=False)
 
-    # 3. Generate Series
     mech_series = monthly_series(df6[mech_mask])
     elec_series = monthly_series(df6[elec_mask])
     
-    # 4. Forecast
     mech_pred = predict_linear_monthly(mech_series, months_ahead=3)
     elec_pred = predict_linear_monthly(elec_series, months_ahead=3)
     
-    # 5. Plot
     fig_split = go.Figure()
-    
-    # Mechanical Line
     if not mech_series.empty:
         fig_split.add_trace(go.Scatter(x=mech_series.index.astype(str), y=mech_series.values, name="Mechanical (Hist)", line=dict(color='cyan')))
-        # Forecast
         last_date = mech_series.index[-1]
         future_dates = [str(last_date + i + 1) for i in range(3)]
         fig_split.add_trace(go.Scatter(x=future_dates, y=mech_pred, name="Mech Forecast", line=dict(color='cyan', dash='dot')))
 
-    # Electrical Line
     if not elec_series.empty:
         fig_split.add_trace(go.Scatter(x=elec_series.index.astype(str), y=elec_series.values, name="Electrical (Hist)", line=dict(color='orange')))
-        # Forecast
         last_date = elec_series.index[-1]
         future_dates = [str(last_date + i + 1) for i in range(3)]
         fig_split.add_trace(go.Scatter(x=future_dates, y=elec_pred, name="Elec Forecast", line=dict(color='orange', dash='dot')))
@@ -230,36 +217,25 @@ def deep_six_month_analyzer(df):
     if 'Functional Location' in df6.columns:
         hotspots = df6['Functional Location'].value_counts().head(10).reset_index()
         hotspots.columns = ['Location', 'Failures']
-        
-        # Bar Chart
-        fig_hot = px.bar(hotspots, x='Failures', y='Location', orientation='h', title="Most Problematic Physical Locations", color='Failures', color_continuous_scale='Reds')
+        fig_hot = px.bar(hotspots, x='Failures', y='Location', orientation='h', title="Most Problematic Locations", color='Failures', color_continuous_scale='Reds')
         st.plotly_chart(fig_hot, use_container_width=True)
     else:
-        st.info("Functional Location column not found. Cannot map hotspots.")
+        st.info("Functional Location column not found.")
 
     # --- SECTION D: CRITICAL LINE FAILURE FORECAST (Markov) ---
     st.markdown("### 4. 📉 Critical Line Failure Forecast (Markov Chain)")
-    
-    # We need to simulate a timeline. 
-    # Logic: If an order exists on a day, is it a breakdown?
     daily_status = df6.groupby(df6['Created_Date'].dt.date)['Order Type'].apply(lambda x: 'Breakdown' if 'Breakdown maintenance' in x.values else 'Running')
     
     if len(daily_status) > 10:
-        # Calculate Transition Matrix
         transitions = {'Running->Running': 0, 'Running->Down': 0, 'Down->Running': 0, 'Down->Down': 0}
         states = daily_status.values
-        
         for i in range(len(states)-1):
-            current = states[i]
-            nxt = states[i+1]
-            key = 'Running' if current == 'Running' else 'Down'
-            key_next = 'Running' if nxt == 'Running' else 'Down'
+            current, nxt = states[i], states[i+1]
+            key, key_next = ('Running' if current == 'Running' else 'Down'), ('Running' if nxt == 'Running' else 'Down')
             transitions[f"{key}->{key_next}"] += 1
             
-        # Calc Probabilities
         run_runs = transitions['Running->Running'] + transitions['Running->Down']
         down_downs = transitions['Down->Running'] + transitions['Down->Down']
-        
         p_fail = transitions['Running->Down'] / run_runs if run_runs > 0 else 0
         p_recover = transitions['Down->Running'] / down_downs if down_downs > 0 else 0
         p_stuck = transitions['Down->Down'] / down_downs if down_downs > 0 else 0
@@ -269,33 +245,42 @@ def deep_six_month_analyzer(df):
         c2.metric("Recovery Probability", f"{p_recover:.1%}", "Chance to fix in 1 day")
         c3.metric("Critical Stuck Risk", f"{p_stuck:.1%}", "Chance failure lasts >24h")
         
-        # Visualizing the Chain
-        nodes = ['Running', 'Down']
-        # Sankey Diagram for flow
         fig_markov = go.Figure(data=[go.Sankey(
-            node = dict(
-              pad = 15, thickness = 20,
-              line = dict(color = "black", width = 0.5),
-              label = ["Running", "Down"],
-              color = ["green", "red"]
-            ),
-            link = dict(
-              source = [0, 0, 1, 1], # 0=Running, 1=Down
-              target = [0, 1, 0, 1],
-              value = [transitions['Running->Running'], transitions['Running->Down'], transitions['Down->Running'], transitions['Down->Down']]
-          ))])
-        
-        fig_markov.update_layout(title="Operational State Transitions (Flow of Reliability)", font_size=10)
+            node = dict(pad = 15, thickness = 20, line = dict(color = "black", width = 0.5), label = ["Running", "Down"], color = ["green", "red"]),
+            link = dict(source = [0, 0, 1, 1], target = [0, 1, 0, 1], value = [transitions['Running->Running'], transitions['Running->Down'], transitions['Down->Running'], transitions['Down->Down']])
+        )])
+        fig_markov.update_layout(title="Operational State Transitions", font_size=10)
         st.plotly_chart(fig_markov, use_container_width=True)
-        
     else:
         st.write("Not enough daily data points to build a Markov Model.")
 
-    # --- SECTION E: TOTAL COST FORECAST (Simple) ---
+    # --- SECTION E: TOTAL COST FORECAST ---
     st.markdown("### 5. 💰 Global Budget Forecast")
     total_series = monthly_series(df6)
     total_preds = predict_linear_monthly(total_series, months_ahead=3)
     fig_total = _plot_history_and_forecast(total_series, total_preds, "Total Maintenance Cost Forecast")
     st.plotly_chart(fig_total, use_container_width=True)
-    if total_preds:
-        st.success(f"Predicted Spend Next Month: **LKR {total_preds[0]:,.2f}**")
+
+
+# ==========================================
+# 3. COMPATIBILITY WRAPPERS (Prevents ImportErrors)
+# ==========================================
+def forecast_spare_parts(df):
+    """
+    Compatibility wrapper: Redirects to Deep Analyzer or returns placeholder.
+    This prevents app.py from crashing when it imports this function.
+    """
+    return None, "Please use 'AI Analyzer' mode for advanced spare part forecasts."
+
+def forecast_cost_prophet(df):
+    """
+    Compatibility wrapper for Prophet forecasting.
+    """
+    # Simple logic to satisfy the import
+    return None, None, "Prophet logic moved to Deep Analyzer."
+
+def forecast_failure_rf(df):
+    """
+    Compatibility wrapper for RF/XGBoost.
+    """
+    return None, "ML Logic moved to Deep Analyzer."
